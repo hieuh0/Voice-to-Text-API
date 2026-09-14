@@ -1,0 +1,16 @@
+.venv/
+.pyrt/
+__pycache__/
+*.pyc
+
+.env
+.instance.lock
+
+jobs/*.json
+tmp/*
+
+!jobs/.gitkeep
+!tmp/.gitkeep
+
+# Whisper model weights get cached here by huggingface_hub, not in the repo
+.cache/

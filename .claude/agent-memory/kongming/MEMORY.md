@@ -1,0 +1,2 @@
+- [Project architecture](project_architecture.md) — Voice-to-Text API MVP decisions: faster-whisper, serial worker, file job store, flagged risks
+- [User profile](user_profile.md) — solo builder, CPU-only Ryzen 5 mobile target, prefers tight go/no-go advice
