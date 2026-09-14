@@ -63,6 +63,12 @@ failure).
   they can be processed, filling `tmp/` with saved videos waiting their turn.
   Once the backlog is full, new uploads get `429` immediately instead of being
   accepted and left to wait indefinitely.
+  Total in-flight capacity is therefore 1 processing + `MAX_QUEUED_JOBS`
+  waiting (6 by default). A `429` means "no slot right now" — the upload is
+  rejected outright (nothing is queued, no video is kept on disk), not
+  silently held. The client must retry `POST /transcribe` later; only once a
+  slot has actually freed up does the request succeed (`202` +
+  `{"status": "queued"}`).
 
 ### Known gaps (MVP scope, not handled)
 
