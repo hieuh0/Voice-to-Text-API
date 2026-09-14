@@ -1,11 +1,14 @@
 import asyncio
 import logging
+import os
+import shutil
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
 from app import config, job_store
 from app.instance_lock import acquire_singleton_lock
@@ -26,8 +29,15 @@ def process_job(app: FastAPI, job_id: str) -> None:
     video_path = Path(job["video_path"])
     audio_path = video_path.with_suffix(".wav")
 
-    job_store.update(job_id, status="processing")
+    # Set/cleared from this worker thread, read from the event loop thread by
+    # GET /status -- a plain attribute assignment is GIL-atomic, so /status
+    # never sees a torn value, only a possibly-one-tick-stale one (fine for a
+    # status indicator). Set inside the try (not before it) so a failure in
+    # job_store.update itself still reaches `finally` and clears the flag,
+    # instead of leaving processing_job_id stuck for the rest of the process.
     try:
+        app.state.processing_job_id = job_id
+        job_store.update(job_id, status="processing")
         extract_audio(video_path, audio_path)
         words = transcribe(app.state.model, audio_path)
         job_store.update(job_id, status="completed", words=words)
@@ -35,6 +45,7 @@ def process_job(app: FastAPI, job_id: str) -> None:
         logger.exception("job %s failed", job_id)
         job_store.update(job_id, status="failed", error=str(exc))
     finally:
+        app.state.processing_job_id = None
         video_path.unlink(missing_ok=True)
         audio_path.unlink(missing_ok=True)
 
@@ -78,6 +89,7 @@ async def lifespan(app: FastAPI):
     # max_workers=1: exactly one transcription runs at a time, matching the
     # single-instance guard above -- this process never oversubscribes CPU.
     app.state.executor = ThreadPoolExecutor(max_workers=1)
+    app.state.processing_job_id = None
     app.state.worker_task = asyncio.create_task(worker_loop(app))
 
     try:
@@ -166,3 +178,37 @@ async def get_transcription(job_id: str):
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+def _readiness_checks() -> dict:
+    # getattr(..., None): defensive, not because these are ever unset while
+    # uvicorn is actually serving requests (lifespan sets them before startup
+    # completes) -- it's so this never 500s with an AttributeError if the app
+    # is exercised without its lifespan (e.g. a TestClient used without the
+    # `with` context manager), keeping the documented 200/503 contract honest.
+    worker_task = getattr(app.state, "worker_task", None)
+    return {
+        "model_loaded": getattr(app.state, "model", None) is not None,
+        "ffmpeg_available": shutil.which("ffmpeg") is not None,
+        "jobs_dir_writable": os.access(config.JOBS_DIR, os.W_OK),
+        "tmp_dir_writable": os.access(config.TMP_DIR, os.W_OK),
+        "worker_alive": worker_task is not None and not worker_task.done(),
+    }
+
+
+@app.get("/status", responses={503: {"description": "Not ready"}})
+async def status():
+    """Readiness (not just liveness): are dependencies actually usable."""
+    checks = _readiness_checks()
+    ready = all(checks.values())
+    queue: asyncio.Queue = getattr(app.state, "queue", None)
+    body = {
+        "ready": ready,
+        "checks": checks,
+        "queue": {
+            "processing": 1 if getattr(app.state, "processing_job_id", None) else 0,
+            "queued": queue.qsize() if queue is not None else 0,
+            "max_queued": config.MAX_QUEUED_JOBS,
+        },
+    }
+    return JSONResponse(status_code=200 if ready else 503, content=body)
