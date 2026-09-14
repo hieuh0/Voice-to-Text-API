@@ -36,6 +36,26 @@ def main() -> None:
             fail(f"/health returned {r.status_code}: {r.text}")
         print("OK:", r.json())
 
+        print("== readiness check ==")
+        r = client.get("/status")
+        if r.status_code != 200:
+            fail(f"/status returned {r.status_code}: {r.text}")
+        body = r.json()
+        if body.get("ready") is not True:
+            fail(f"expected ready=true against a running server, got: {body}")
+        for key in (
+            "model_loaded",
+            "ffmpeg_available",
+            "jobs_dir_writable",
+            "tmp_dir_writable",
+            "worker_alive",
+        ):
+            if body["checks"].get(key) is not True:
+                fail(f"expected checks.{key}=true, got: {body}")
+        if body.get("queue", {}).get("processing") != 0:
+            fail(f"expected queue.processing=0 while idle, got: {body}")
+        print("OK:", body)
+
         print("== reject non-mp4 upload ==")
         r = client.post("/transcribe", files={"file": ("note.txt", b"hello", "text/plain")})
         if r.status_code != 400:
@@ -65,12 +85,17 @@ def main() -> None:
         print(f"== polling GET /transcribe/{job_id} ==")
         deadline = time.time() + POLL_TIMEOUT_SEC
         final = None
+        observed_processing_in_status = False
         while time.time() < deadline:
             r = client.get(f"/transcribe/{job_id}")
             if r.status_code != 200:
                 fail(f"GET /transcribe/{job_id} returned {r.status_code}: {r.text}")
             body = r.json()
             print("  status:", body.get("status"))
+            if body["status"] == "processing":
+                status_body = client.get("/status").json()
+                if status_body.get("queue", {}).get("processing") == 1:
+                    observed_processing_in_status = True
             if body["status"] in ("completed", "failed"):
                 final = body
                 break
@@ -78,6 +103,13 @@ def main() -> None:
 
         if final is None:
             fail(f"job did not finish within {POLL_TIMEOUT_SEC}s")
+
+        if not observed_processing_in_status:
+            fail("never observed GET /status report queue.processing=1 while the job was processing")
+
+        status_body = client.get("/status").json()
+        if status_body.get("queue", {}).get("processing") != 0:
+            fail(f"expected queue.processing=0 after job finished, got: {status_body}")
 
         if final["status"] == "failed":
             fail(f"job failed: {final.get('error')}")

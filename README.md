@@ -22,6 +22,11 @@ GET /transcribe/{job_id}
   -> queued / processing: {"job_id", "status"}
   -> completed: {"job_id", "status", "words": [{"word","start","end"}, ...]}
   -> failed: {"job_id", "status", "error"}
+
+GET /health   -> liveness: {"status": "ok"} whenever the process is up
+GET /status   -> readiness: 200 + {"ready": true, ...} once the model is
+                 loaded, ffmpeg is on PATH, and jobs/tmp dirs are writable;
+                 503 + {"ready": false, ...} otherwise
 ```
 
 No database: job state is one JSON file per job under `jobs/`. Temp media
@@ -137,6 +142,14 @@ curl http://127.0.0.1:8000/transcribe/<id>
 # -> {"job_id":"<id>","status":"processing"}
 # ... then ...
 # -> {"job_id":"<id>","status":"completed","words":[{"word":"Where","start":0.0,"end":0.16}, ...]}
+
+# 3. Check readiness (model loaded, ffmpeg on PATH, dirs writable, worker alive)
+curl http://127.0.0.1:8000/status
+# -> 200 {"ready":true,"checks":{"model_loaded":true,"ffmpeg_available":true,
+#          "jobs_dir_writable":true,"tmp_dir_writable":true,"worker_alive":true},
+#         "queue":{"processing":0,"queued":0,"max_queued":5}}
+# -> 503 with the same shape (ready:false) if a check fails, e.g. ffmpeg missing
+#    or the background worker thread died
 ```
 
 ## Configuration (env vars, see `.env.example`)
