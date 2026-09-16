@@ -8,6 +8,9 @@ load_dotenv(BASE_DIR / ".env")
 
 # --- Whisper ---
 WHISPER_MODEL = os.getenv("WHISPER_MODEL", "small")
+WHISPER_LANGUAGE = os.getenv("WHISPER_LANGUAGE", "vi")
+WHISPER_BEAM_SIZE = int(os.getenv("WHISPER_BEAM_SIZE", "5"))
+WHISPER_VAD_FILTER = os.getenv("WHISPER_VAD_FILTER", "true").lower() in {"1", "true", "yes"}
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE_TYPE = os.getenv("WHISPER_COMPUTE_TYPE", "int8")
 

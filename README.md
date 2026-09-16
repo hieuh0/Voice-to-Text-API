@@ -20,14 +20,50 @@ Background worker (single thread, one job at a time)
 
 GET /transcribe/{job_id}
   -> queued / processing: {"job_id", "status"}
-  -> completed: {"job_id", "status", "words": [{"word","start","end"}, ...]}
+  -> completed: transcript, segments, words, source_sha256, duration_sec,
+     language/model metadata, provenance, authoritative, evidence_status, alignment
   -> failed: {"job_id", "status", "error"}
 
 GET /health   -> liveness: {"status": "ok"} whenever the process is up
 GET /status   -> readiness: 200 + {"ready": true, ...} once the model is
                  loaded, ffmpeg is on PATH, and jobs/tmp dirs are writable;
                  503 + {"ready": false, ...} otherwise
+
+## Integration contract
+
+`POST /transcribe` remains asynchronous and accepts an MP4 plus optional bounded
+form field `expected_text` (maximum 1000 characters):
+
+```bash
+curl -X POST http://127.0.0.1:8000/transcribe \
+  -F "file=@tests/fixtures/sample.mp4;type=video/mp4" \
+  -F "expected_text=Xin chào các bạn"
+# {"job_id":"<id>","status":"queued"}
+curl http://127.0.0.1:8000/transcribe/<id>
 ```
+
+Completed evidence has this shape:
+
+```json
+{
+  "job_id": "<id>", "status": "completed", "transcript": "...",
+  "segments": [{"text": "...", "start": 0.0, "end": 1.2,
+                "words": [{"word": "...", "start": 0.0, "end": 0.4}]}],
+  "words": [{"word": "...", "start": 0.0, "end": 0.4}],
+  "source_sha256": "<sha256>", "duration_sec": 12.3,
+  "language": "vi", "model": "small", "provenance": "raw-asr",
+  "authoritative": false, "evidence_status": "validated_mismatch",
+  "alignment": {"status": "mismatch", "match": false}
+}
+```
+
+Timestamps are rejected if non-finite, non-monotonic, outside the source
+duration, or if words fall outside their segment. Raw ASR output always has
+`authoritative: false`, even when normalized `expected_text` matches. The
+`alignment.match` and `evidence_status: validated_match` fields are evidence
+for Gold Studio's separate policy; they are not calibrated confidence or an
+authority guarantee. This service emits raw ASR evidence only: it does not
+plan cuts, invoke an LLM or OmniVoice, or edit media with FFmpeg.
 
 No database: job state is one JSON file per job under `jobs/`. Temp media
 lives under `tmp/` and is deleted as soon as a job finishes (success or
@@ -141,7 +177,9 @@ curl -X POST http://127.0.0.1:8000/transcribe \
 curl http://127.0.0.1:8000/transcribe/<id>
 # -> {"job_id":"<id>","status":"processing"}
 # ... then ...
-# -> {"job_id":"<id>","status":"completed","words":[{"word":"Where","start":0.0,"end":0.16}, ...]}
+# -> {"job_id":"<id>","status":"completed","transcript":"...","segments":[...],
+#     "words":[{"word":"Where","start":0.0,"end":0.16},...],
+#     "source_sha256":"...","duration_sec":1.2,"language":"vi",...}
 
 # 3. Check readiness (model loaded, ffmpeg on PATH, dirs writable, worker alive)
 curl http://127.0.0.1:8000/status
@@ -156,7 +194,10 @@ curl http://127.0.0.1:8000/status
 
 | Variable | Default | Notes |
 |---|---|---|
+| `WHISPER_LANGUAGE` | `vi` | Vietnamese ASR language passed to faster-whisper |
 | `WHISPER_MODEL` | `small` | `tiny`\|`base`\|`small`\|`medium`\|`large-v3` |
+| `WHISPER_BEAM_SIZE` | `5` | beam search width |
+| `WHISPER_VAD_FILTER` | `true` | faster-whisper VAD filtering |
 | `WHISPER_DEVICE` | `cpu` | |
 | `WHISPER_COMPUTE_TYPE` | `int8` | int8 quantization for CPU speed/RAM |
 | `WHISPER_CPU_THREADS` | `logical_cpus // 2 - 1` | tune per machine |
